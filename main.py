@@ -83,7 +83,7 @@ async def logging_middleware(request: Request, call_next):
     return response
 
 # ルーター登録
-for mod_name, attr_name in [("audio_router", "router"), ("tailscale_router", "router"), ("ai_router", "router")]:
+for mod_name, attr_name in [("system_router", "router"), ("audio_router", "router"), ("tailscale_router", "router"), ("ai_router", "router")]:
     try:
         mod = __import__(mod_name, fromlist=[attr_name])
         app.include_router(getattr(mod, attr_name))
