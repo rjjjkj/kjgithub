@@ -1,0 +1,19 @@
+# Python artifacts
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+
+# Environments
+venv/
+env/
+ENV/
+
+# Configuration & Secrets
+.env
+/etc/default/fastapi
+
+# Logs & Temp files
+*.log
+/tmp/
+.pytest_cache/

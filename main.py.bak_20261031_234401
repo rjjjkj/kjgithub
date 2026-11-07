@@ -1,0 +1,153 @@
+import subprocess
+import os
+import re
+from fastapi import FastAPI, BackgroundTasks
+from fastapi.responses import HTMLResponse
+import requests
+
+app = FastAPI(title="k2-server Audio Hub v2")
+
+CONFIG_PATH = "/etc/camilladsp/config.yml"
+DAC_STREAM_PATH = "/proc/asound/card3/stream0"
+BINAURAL_FILE = "/run/k2-audio/sleep_delta.wav"
+
+def get_dac_status():
+    if not os.path.exists(DAC_STREAM_PATH):
+        return {"status": "Disconnected", "freq": "N/A", "format": "N/A"}
+    try:
+        with open(DAC_STREAM_PATH, "r") as f:
+            content = f.read()
+        status = "Running" if "Status: Running" in content else "Stop"
+        freq_match = re.search(r"Momentary freq = (\d+) Hz", content)
+        freq = f"{int(freq_match.group(1))//1000}kHz" if freq_match else "96kHz"
+        fmt = "24bit" if "S24_3LE" in content else "16bit"
+        return {"status": status, "freq": freq, "format": fmt}
+    except Exception:
+        return {"status": "Error", "freq": "N/A", "format": "N/A"}
+
+def get_current_profile():
+    if os.path.islink(CONFIG_PATH):
+        target = os.readlink(CONFIG_PATH)
+        if "speaker" in target:
+            return "speaker"
+    return "iem"
+
+@app.get("/", response_class=HTMLResponse)
+def index():
+    dac = get_dac_status()
+    mode = get_current_profile()
+    binaural_running = subprocess.run("pgrep -f 'aplay.*sleep_delta'", shell=True).returncode == 0
+    if binaural_running:
+        mode = "binaural"
+
+    return f"""
+    <!DOCTYPE html>
+    <html lang="ja">
+    <head>
+        <meta charset="UTF-8">
+        <meta name="viewport" content="width=device-width, initial-scale=1.0">
+        <title>k2-server Audio Hub</title>
+        <style>
+            body {{ font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; background: #0f172a; color: #f8fafc; margin: 0; padding: 16px; }}
+            .card {{ background: #1e293b; border-radius: 12px; padding: 16px; margin-bottom: 16px; box-shadow: 0 4px 6px -1px rgba(0,0,0,0.3); }}
+            h2 {{ font-size: 1.1rem; color: #38bdf8; margin-top: 0; display: flex; justify-content: space-between; }}
+            .badge {{ font-size: 0.8rem; padding: 2px 8px; border-radius: 4px; font-weight: bold; }}
+            .badge-green {{ background: #10b981; color: #022c22; }}
+            .badge-blue {{ background: #0ea5e9; color: #082f49; }}
+            .badge-purple {{ background: #a855f7; color: #3b0764; }}
+            .btn-group {{ display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-top: 12px; }}
+            button {{ border: none; padding: 10px; border-radius: 8px; font-weight: bold; cursor: pointer; color: #fff; }}
+            .btn-spk {{ background: #0284c7; }}
+            .btn-iem {{ background: #059669; }}
+            .btn-bin {{ background: #7c3aed; grid-column: span 2; }}
+            .btn-stop {{ background: #dc2626; grid-column: span 2; }}
+            .btn-ai {{ background: #d97706; width: 100%; margin-top: 8px; }}
+            .terminal {{ background: #090d16; border-radius: 6px; padding: 10px; font-family: monospace; font-size: 0.75rem; color: #94a3b8; overflow-x: auto; white-space: pre-wrap; word-break: break-all; margin-top: 8px; }}
+            .eq-grid {{ display: grid; grid-template-columns: repeat(3, 1fr); gap: 6px; margin-top: 8px; font-size: 0.75rem; text-align: center; }}
+            .eq-item {{ background: #334155; padding: 6px; border-radius: 4px; }}
+        </style>
+    </head>
+    <body>
+        <h1 style="font-size: 1.3rem; color: #38bdf8; margin-bottom: 16px;">🎧 k2-server Audio Hub</h1>
+
+        <div class="card">
+            <h2>Audio Engine <span><span class="badge {'badge-purple' if mode=='binaural' else ('badge-green' if mode=='iem' else 'badge-blue')}">{mode.upper()}</span></span></h2>
+            <div style="font-size: 0.85rem; line-height: 1.6;">
+                <div>DAC: <b>FOSTEX HP-A3</b> ({dac['format']} Bit-Perfect)</div>
+                <div>Hardware Stream: <b style="color: {'#10b981' if dac['status']=='Running' else '#ef4444'}">{dac['status']}</b> ({dac['freq']})</div>
+            </div>
+
+            <div class="btn-group">
+                <button class="btn-spk" onclick="fetch('/set-mode/spk').then(()=>location.reload())">Speaker (SC-M37)</button>
+                <button class="btn-iem" onclick="fetch('/set-mode/iem').then(()=>location.reload())">IEM (radius Noir)</button>
+                {'''<button class="btn-stop" onclick="fetch('/binaural/stop').then(()=>location.reload())">⏹ 睡眠音響を停止</button>''' if binaural_running else '''<button class="btn-bin" onclick="fetch('/binaural/start').then(()=>location.reload())">🌙 Binaural Sleep (Delta 2.5Hz)</button>'''}
+            </div>
+        </div>
+
+        <div class="card">
+            <h2>Active DSP Profile</h2>
+            {'<div class="eq-grid"><div class="eq-item">Sub Kick<br><b>68Hz +1.8dB</b></div><div class="eq-item">Mud Cut<br><b>280Hz -1.8dB</b></div><div class="eq-item">Guitar Bite<br><b>4.0kHz +2.2dB</b></div><div class="eq-item">Hi-Hat<br><b>8.5kHz +2.0dB</b></div><div class="eq-item">Air Shelf<br><b>11kHz +2.8dB</b></div><div class="eq-item">Crossfeed<br><b>-13.0dB (ITD)</b></div></div>' if mode=='iem' else '<div style="font-size:0.8rem; color:#94a3b8;">Stereo Direct Pass-through (Preamp -1.0dB, Subsonic HPF 20Hz)</div>'}
+        </div>
+
+        <div class="card">
+            <h2>AI 音響工学診断 (Ollama)</h2>
+            <button class="btn-ai" onclick="runAiAnalysis()">📊 リアルタイム音響分析を実行</button>
+            <div id="ai-result" class="terminal">分析ボタンを押すと、現在のDSP構成とハードウェア状態に対する音響工学的診断を開始します...</div>
+        </div>
+
+        <script>
+            function runAiAnalysis() {{
+                const out = document.getElementById('ai-result');
+                out.innerText = "Ollama推論中（音響パラメータを解析中）...";
+                fetch('/ai-analyze')
+                    .then(r => r.json())
+                    .then(data => {{ out.innerText = data.analysis; }})
+                    .catch(e => {{ out.innerText = "エラー: " + e; }});
+            }}
+        </script>
+    </body>
+    </html>
+    """
+
+@app.get("/set-mode/{mode}")
+def set_mode(mode: str):
+    if mode == "spk":
+        subprocess.run("sudo ln -sf /etc/camilladsp/config_speaker.yml /etc/camilladsp/config.yml && sudo systemctl restart camilladsp.service", shell=True)
+    elif mode == "iem":
+        subprocess.run("sudo ln -sf /etc/camilladsp/config_iem_rock.yml /etc/camilladsp/config.yml && sudo systemctl restart camilladsp.service", shell=True)
+    return {"status": "ok", "mode": mode}
+
+@app.get("/binaural/start")
+def start_binaural(background_tasks: BackgroundTasks):
+    def _run():
+        if not os.path.exists(BINAURAL_FILE):
+            subprocess.run("/usr/local/bin/k2-binaural-gen", shell=True)
+        subprocess.run("aplay -D loop_shared /run/k2-audio/sleep_delta.wav", shell=True)
+    background_tasks.add_task(_run)
+    return {"status": "started"}
+
+@app.get("/binaural/stop")
+def stop_binaural():
+    subprocess.run("pkill -f 'aplay.*sleep_delta'", shell=True)
+    return {"status": "stopped"}
+
+@app.get("/ai-analyze")
+def ai_analyze():
+    dac = get_dac_status()
+    mode = get_current_profile()
+    prompt = f"""[System: You are an expert audio DSP engineer. Strictly analyze technical acoustic engineering parameters only. Do NOT give medical, anatomical, or biological advice.]
+Device: FOSTEX HP-A3 (24bit/96kHz bit-perfect).
+Profile: {mode.upper()}.
+DAC Status: {dac['status']} ({dac['freq']}).
+Task: Evaluate the frequency response, ITD crossfeed separation, and headroom safety. Keep it concise in Japanese (3 bullet points)."""
+
+    try:
+        res = requests.post("http://127.0.0.1:11434/api/generate", json={
+            "model": "qwen2.5:1.5b",
+            "prompt": prompt,
+            "stream": False,
+            "options": {"temperature": 0.2}
+        }, timeout=15)
+        return {"analysis": res.json().get("response", "診断結果の取得に失敗しました。")}
+    except Exception as e:
+        return {"analysis": f"Ollama連携エラー: {str(e)}"}

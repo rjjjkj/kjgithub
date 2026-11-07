@@ -1,0 +1,252 @@
+import os
+import json
+import psutil
+import subprocess
+import urllib.request
+from fastapi import FastAPI, Form
+from fastapi.responses import HTMLResponse, RedirectResponse
+from websocket import create_connection
+
+app = FastAPI()
+
+MODE_FILE = "/etc/camilladsp/current_mode"
+SYS_AUDIT_FILE = "/opt/api-server/latest_audit.txt"
+AUDIO_AUDIT_FILE = "/opt/api-server/latest_audio_audit.txt"
+CAMILLADSP_WS = "ws://127.0.0.1:1234"
+OLLAMA_API_URL = "http://127.0.0.1:11434/api/generate"
+OLLAMA_MODEL = "qwen2.5:0.5b"
+
+def query_ollama(prompt: str, max_tokens: int = 200, timeout: float = 35.0) -> str:
+    payload = {
+        "model": OLLAMA_MODEL,
+        "prompt": prompt,
+        "stream": False,
+        "keep_alive": "24h",
+        "options": {
+            "num_predict": max_tokens,
+            "temperature": 0.2,
+            "repeat_penalty": 1.15,
+            "num_ctx": 1024
+        }
+    }
+    req = urllib.request.Request(
+        OLLAMA_API_URL,
+        data=json.dumps(payload).encode("utf-8"),
+        headers={"Content-Type": "application/json"}
+    )
+    with urllib.request.urlopen(req, timeout=timeout) as res:
+        data = json.loads(res.read().decode("utf-8"))
+        return data.get("response", "").strip()
+
+def get_sys_info():
+    mode = "unknown"
+    if os.path.exists(MODE_FILE):
+        try:
+            with open(MODE_FILE, "r") as f:
+                mode = f.read().strip()
+        except Exception:
+            pass
+
+    track = "停止中 / 不明"
+    try:
+        out = subprocess.check_output(
+            ["journalctl", "-u", "raspotify", "-n", "15", "--output=cat"],
+            stderr=subprocess.DEVNULL, text=True
+        )
+        tracks = [l for l in out.splitlines() if "Loading <" in l]
+        if tracks:
+            track = tracks[-1].strip()
+    except Exception:
+        pass
+
+    return {
+        "cpu": psutil.cpu_percent(interval=None),
+        "mem": psutil.virtual_memory().percent,
+        "mem_used": round(psutil.virtual_memory().used / 1024 / 1024, 1),
+        "mem_total": round(psutil.virtual_memory().total / 1024 / 1024, 1),
+        "disk": psutil.disk_usage("/").percent,
+        "load": os.getloadavg(),
+        "mode": mode,
+        "track": track
+    }
+
+def get_camilladsp_telemetry():
+    try:
+        ws = create_connection(CAMILLADSP_WS, timeout=2)
+        ws.send('"GetPlaybackSignalLevels"')
+        playback_levels = json.loads(ws.recv()).get("value", {})
+        ws.send('"GetCaptureSignalLevels"')
+        capture_levels = json.loads(ws.recv()).get("value", {})
+        ws.send('"GetClippedSamples"')
+        clipped = json.loads(ws.recv()).get("value", 0)
+        ws.send('"GetVolume"')
+        volume = json.loads(ws.recv()).get("value", 0)
+        ws.close()
+        return {
+            "volume_db": volume,
+            "clipped_samples": clipped,
+            "playback_rms": playback_levels.get("rms", []),
+            "playback_peak": playback_levels.get("peak", []),
+            "capture_rms": capture_levels.get("rms", []),
+            "capture_peak": capture_levels.get("peak", [])
+        }
+    except Exception as e:
+        return {"error": str(e)}
+
+@app.get("/metrics")
+def metrics():
+    info = get_sys_info()
+    dsp = get_camilladsp_telemetry()
+    return {
+        "system": {
+            "cpu_percent": info["cpu"],
+            "memory_percent": info["mem"],
+            "memory_used_mb": info["mem_used"],
+            "memory_total_mb": info["mem_total"],
+            "disk_percent": info["disk"],
+            "load_avg": info["load"]
+        },
+        "audio": {
+            "dsp_mode": info["mode"],
+            "sample_rate": 96000,
+            "dac": "Fostex HP-A3",
+            "last_track": info["track"],
+            "dsp_telemetry": dsp
+        }
+    }
+
+@app.get("/", response_class=HTMLResponse)
+def dashboard():
+    info = get_sys_info()
+    dsp = get_camilladsp_telemetry()
+
+    sys_audit = "未実行（ボタンを押して診断を実行）"
+    if os.path.exists(SYS_AUDIT_FILE):
+        try:
+            with open(SYS_AUDIT_FILE, "r", encoding="utf-8") as f:
+                sys_audit = f.read().strip()
+        except Exception:
+            pass
+
+    audio_audit = "未実行（ボタンを押して診断を実行）"
+    if os.path.exists(AUDIO_AUDIT_FILE):
+        try:
+            with open(AUDIO_AUDIT_FILE, "r", encoding="utf-8") as f:
+                audio_audit = f.read().strip()
+        except Exception:
+            pass
+
+    html = f"""<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>k2-server Audio Hub</title>
+  <style>
+    body {{ background: #0f172a; color: #f8fafc; font-family: monospace, sans-serif; padding: 20px; max-width: 680px; margin: auto; }}
+    .card {{ background: #1e293b; border-radius: 8px; padding: 18px; margin-bottom: 16px; border: 1px solid #334155; }}
+    h1 {{ font-size: 1.3rem; color: #38bdf8; margin-top: 0; }}
+    h2 {{ font-size: 1.0rem; color: #94a3b8; border-bottom: 1px solid #334155; padding-bottom: 6px; margin-top: 0; }}
+    .metric {{ display: flex; justify-content: space-between; margin: 8px 0; font-size: 0.95rem; }}
+    .track {{ background: #0f172a; padding: 10px; border-radius: 4px; font-size: 0.85rem; color: #a5f3fc; word-break: break-all; margin: 8px 0; }}
+    .report {{ background: #0b1329; border: 1px solid #1e3a8a; padding: 12px; border-radius: 6px; font-size: 0.85rem; color: #93c5fd; white-space: pre-wrap; line-height: 1.5; max-height: 250px; overflow-y: auto; }}
+    .btn-group {{ display: flex; gap: 10px; margin-top: 12px; }}
+    button {{ flex: 1; padding: 12px; font-weight: bold; border: none; border-radius: 6px; cursor: pointer; color: #fff; font-size: 0.95rem; }}
+    .btn-spk {{ background: #0284c7; }}
+    .btn-iem {{ background: #059669; }}
+    .btn-sys {{ background: #4f46e5; width: 100%; margin-top: 8px; }}
+    .btn-audio {{ background: #d97706; width: 100%; margin-top: 8px; }}
+    .badge {{ display: inline-block; padding: 2px 8px; border-radius: 4px; background: #22c55e; color: #000; font-weight: bold; }}
+  </style>
+</head>
+<body>
+  <h1>🎧 k2-server Audio Hub</h1>
+
+  <div class="card">
+    <h2>Audio Engine (96kHz / CamillaDSP)</h2>
+    <div class="metric"><span>Current Mode:</span> <span class="badge">{info['mode']}</span></div>
+    <div class="metric"><span>DAC:</span> <span>Fostex HP-A3 (24bit Bit-Perfect)</span></div>
+    <div class="metric"><span>Clipped Samples:</span> <span>{dsp.get('clipped_samples', 'N/A')}</span></div>
+    <div class="track">{info['track']}</div>
+
+    <div class="btn-group">
+      <form method="post" action="/set-mode" style="flex:1;">
+        <input type="hidden" name="mode" value="speaker">
+        <button type="submit" class="btn-spk">Speaker (SC-M37)</button>
+      </form>
+      <form method="post" action="/set-mode" style="flex:1;">
+        <input type="hidden" name="mode" value="iem">
+        <button type="submit" class="btn-iem">IEM (radius Noir)</button>
+      </form>
+    </div>
+  </div>
+
+  <div class="card">
+    <h2>🎛️ AI 音響工学診断 (Ollama)</h2>
+    <div class="report">{audio_audit}</div>
+    <form method="post" action="/run-audio-audit">
+      <button type="submit" class="btn-audio">📊 リアルタイム音響分析を実行</button>
+    </form>
+  </div>
+
+  <div class="card">
+    <h2>🖥️ System Status & AI 診断</h2>
+    <div class="metric"><span>CPU:</span> <span>{info['cpu']}%</span> | <span>Mem:</span> <span>{info['mem']}%</span> | <span>Disk:</span> <span>{info['disk']}%</span></div>
+    <div class="report" style="margin-top: 10px;">{sys_audit}</div>
+    <form method="post" action="/run-sys-audit">
+      <button type="submit" class="btn-sys">⚡ システムリソース診断を実行</button>
+    </form>
+  </div>
+</body>
+</html>
+"""
+    return html
+
+@app.post("/set-mode")
+def set_mode(mode: str = Form(...)):
+    if mode in ["speaker", "iem"]:
+        subprocess.run(["sudo", "/usr/local/bin/dsp-mode", mode], check=False)
+    return RedirectResponse(url="/", status_code=303)
+
+@app.post("/run-audio-audit")
+def run_audio_audit():
+    telemetry = get_camilladsp_telemetry()
+    info = get_sys_info()
+    payload_str = json.dumps({
+        "mode": info["mode"],
+        "track": info["track"],
+        "dsp": telemetry
+    }, ensure_ascii=False)
+
+    prompt = f"""CamillaDSPテレメトリを3点で簡潔に評価せよ(前置き不要):
+データ: {payload_str}
+1. クリッピング余裕度(Preamp -6.5dB基準)
+2. ダイナミクス状態
+3. {info['mode']}環境(SC-M37またはradius Noir)への一言アドバイス"""
+
+    try:
+        report = query_ollama(prompt, max_tokens=180, timeout=35.0)
+    except Exception as e:
+        report = f"音響診断失敗: {e}"
+
+    with open(AUDIO_AUDIT_FILE, "w", encoding="utf-8") as f:
+        f.write(report)
+    return RedirectResponse(url="/", status_code=303)
+
+@app.post("/run-sys-audit")
+def run_sys_audit():
+    info = get_sys_info()
+    payload_str = json.dumps(info, ensure_ascii=False)
+
+    prompt = f"""k2-serverのメトリクスを簡潔に評価せよ(前置き不要):
+データ: {payload_str}
+CPU・メモリ・ディスク数値から異常有無とリソース余裕度を3行以内で記述すること。"""
+
+    try:
+        report = query_ollama(prompt, max_tokens=150, timeout=35.0)
+    except Exception as e:
+        report = f"システム診断失敗: {e}"
+
+    with open(SYS_AUDIT_FILE, "w", encoding="utf-8") as f:
+        f.write(report)
+    return RedirectResponse(url="/", status_code=303)
