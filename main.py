@@ -1,10 +1,43 @@
+import time
 import logging
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger("api-server")
+# ログ設定 (systemd / journalctl 向け)
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(message)s",
+    datefmt="%Y-%m-%d %H:%M:%S"
+)
+logger = logging.getLogger("api-access")
 
 app = FastAPI(title="k2-server API", version="1.0.0")
+
+# アクセスログ & レスポンスタイム計測ミドルウェア
+@app.middleware("http")
+async def custom_access_log_middleware(request: Request, call_next):
+    start_time = time.perf_counter()
+
+    # クライアントIPの取得（プロキシ・Tailscale経由も考慮）
+    forwarded = request.headers.get("X-Forwarded-For")
+    if forwarded:
+        client_ip = forwarded.split(",")[0].strip()
+    else:
+        client_ip = request.client.host if request.client else "unknown"
+
+    response = await call_next(request)
+
+    # 処理時間の算出 (ミリ秒)
+    process_time = (time.perf_counter() - start_time) * 1000
+
+    # ログ出力: IP - "METHOD PATH" STATUS - TIMEms
+    logger.info(
+        f'{client_ip} - "{request.method} {request.url.path}" '
+        f'{response.status_code} - {process_time:.2f}ms'
+    )
+
+    # クライアント側でも確認できるようヘッダーにも付与
+    response.headers["X-Process-Time"] = f"{process_time:.2f}ms"
+    return response
 
 # audio_router のマウント
 try:
