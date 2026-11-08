@@ -1,2 +1,3 @@
 # Custom Whitelist for Ollama Guard (1 domain per line)
 test-github-block.internal
+7f8b9c0d1e2f3a4b5c6d.xyz
