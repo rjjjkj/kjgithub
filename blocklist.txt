@@ -1,2 +1,3 @@
 ! Custom Blocklist
 ||test-github-block.internal^
+||ads.unwanted-tracker.com^
