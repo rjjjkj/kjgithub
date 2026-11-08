@@ -1,0 +1,2 @@
+! Custom Blocklist
+||test-github-block.internal^
