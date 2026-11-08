@@ -1,2 +1,3 @@
 ! Custom Blocklist
 ||ads.unwanted-tracker.com^
+||test-pipeline-verify.internal^
