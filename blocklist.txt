@@ -4,3 +4,4 @@
 ||malicious-test-c2.internal^
 ||szw7k270duj-13c4c1.test.nextdns.io^
 ||95yuwof5xwa-13c4c1.test.nextdns.io^
+||6xvaq5w5pn-13c4c1.test.nextdns.io^
