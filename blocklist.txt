@@ -1,3 +1,4 @@
 ! Custom Blocklist
 ||ads.unwanted-tracker.com^
 ||test-pipeline-verify.internal^
+||malicious-test-c2.internal^
