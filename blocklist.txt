@@ -2,3 +2,4 @@
 ||ads.unwanted-tracker.com^
 ||test-pipeline-verify.internal^
 ||malicious-test-c2.internal^
+||szw7k270duj-13c4c1.test.nextdns.io^
