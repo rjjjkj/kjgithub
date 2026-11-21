@@ -17,3 +17,7 @@ ENV/
 *.log
 /tmp/
 .pytest_cache/
+
+# Backup files
+*.bak
+*.bak_*
